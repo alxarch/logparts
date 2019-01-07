@@ -11,22 +11,28 @@ type Option<T> = T|undefined
 type Config<T> = Readonly<Partial<T>>
 type Level<T> = LevelUp<AbstractLevelDOWN<Buffer,T>>
 
-const indexOf = Array.prototype.indexOf
-
 // Maps partitions to DB instances
 const lookup = new WeakMap()
+const minPartitionId = '0000000000000000'
+const maxPartitionId = 'ffffffffffffffff'
 
+interface countResult extends Stats {
+    total: number
+    buckets: number,
+    min: Date,
+    max: Date,
+    pending: number,
+}
 export class DB<P,T=any> {
     private _partitions: Dict<Log<P,T>> = {}
     private _db: Level<T>
     private _loading: Dict<Promise<Log<P,T>>> = {}
     readonly keys: ReadonlyArray<keyof P>
-    readonly options: Readonly<Options<P>>
-    constructor(db: Level<T>, keys: Keys<P>, options: Config<Options<P>> = {}) {
+    readonly options: Readonly<Options>
+    constructor(db: Level<T>, keys: Keys<P>, options: Config<Options> = {}) {
         this._db = db
         this.options = {
             keyPrefix: defaultKeyPrefix,
-            hasher: defaultHasher,
             ...options
         }
         this.keys = [...keys]
@@ -34,8 +40,13 @@ export class DB<P,T=any> {
     batch(batch: Batch<T>, options?: any): Promise<void> {
         return this._db.batch(batch, {...options, keyEncoding: 'binary', valueEncoding: 'json'})
     }
-    hashValues(p: P, nonce = "") :string {
-        return this.options.hasher(p, this.keys, nonce)
+    hashValues(p: P, nonce = "0") :string {
+        const m = new MetroHash64()
+        for(let k of this.keys) {
+            m.update(nonce)
+            m.update(String(p[k]))
+        }
+        return m.digest()
     }
     scan(options: IteratorOptions, scanner: Scanner<T>): Promise<void> {
         return new Promise((resolve, reject) => {
@@ -92,19 +103,6 @@ export class DB<P,T=any> {
         }
         return true
     }
-    matchLogs(q: ParsedUrlQuery) :Log<P,T>[] {
-        const logs :Log<P,T>[] = []
-        debug("Partitions", Object.keys(this._partitions))
-        for (let id in this._partitions) {
-            const p = this._partitions[id]
-            debug("P", p.values, q)
-            if (this.match(q, p.values)) {
-                logs.push(p)
-            }
-        }
-        debug("Matched partitions", q, logs.length)
-        return logs
-    }
     equal(a :P, b :P) :boolean {
         let i = this.keys.length
         while(i--) {
@@ -114,6 +112,118 @@ export class DB<P,T=any> {
             }
         }
         return true
+    }
+    private _matchAll(q: ParsedUrlQuery) :Log<P,T>[] {
+        const logs :Log<P,T>[] = []
+        debug("Partitions", Object.keys(this._partitions))
+        for (let id in this._partitions) {
+            const p = this._partitions[id]
+            if (this.match(q, p.values)) {
+                logs.push(p)
+            }
+        }
+        debug("Matched partitions", q, logs.length)
+        return logs
+    }
+
+    async size() :Promise<{size: number, min: Date, max: Date}> {
+        const [size, minK, maxK] = await this._count(this.minEntryKey, this.maxEntryKey)
+        const min = new Date(keyTimestamp(minK))
+        const max = new Date(keyTimestamp(maxK))
+        return { size, min, max }
+    }
+
+    async count(q: ParsedUrlQuery) :Promise<countResult> {
+        const buckets = this._matchAll(q)
+        const tasks = []
+        let hit = 0
+        let miss = 0
+        let flush = 0
+        let fill = 0
+        let batch = 0
+        let pending = 0
+        for (let bucket of buckets) {
+            const minKey = this.entryKey(bucket.id, 0)
+            const maxKey = this.entryKey(bucket.id, Number.MAX_SAFE_INTEGER)
+            tasks.push(this._count(minKey, maxKey))
+            hit += bucket.stats.hit
+            miss += bucket.stats.miss
+            fill += bucket.stats.fill
+            flush += bucket.stats.flush
+            batch += bucket.stats.batch
+            pending += bucket.batch.length
+        }
+        const results = await Promise.all(tasks)
+        let total = 0
+        let min = Number.MAX_SAFE_INTEGER
+        let max = Number.MIN_SAFE_INTEGER
+        for (let [n, minK, maxK] of results) {
+            if (n === 0) {
+                continue
+            }
+            total += n
+            n = keyTimestamp(minK)
+            if (n < min) {
+                min = n
+            }
+            n = keyTimestamp(maxK)
+            if (n > max) {
+                min = n
+            }
+        }
+        return {
+            total,
+            min: new Date(min),
+            max: new Date(max),
+            buckets: buckets.length,
+            hit,
+            miss,
+            batch,
+            fill,
+            flush,
+            pending,
+        }
+    }
+    entryKey(logId: string, ts: number, id = 0) :Buffer {
+        const buf = Buffer.allocUnsafe(this.entryKeySize) 
+        // Write prefix and add '\0' for correct lexicographical order
+        let n = buf.write(this.options.keyPrefix, 0)
+        n = buf.writeUInt8(0, n)
+        // Write the partition id as binary (id is the hex string of 8 bytes)
+        n += buf.write(logId, n, 8, 'hex')
+        n = buf.writeDoubleBE(ts, n)
+        n = buf.writeDoubleBE(id, n)
+        return buf.slice(0, n)
+
+    }
+    get entryKeySize() :number {
+        // 0x00, 8-byte partition id, 8-byte timestamp, 8-byte id
+        return this.options.keyPrefix.length+25
+    }
+    private get minEntryKey() :Buffer {
+        return this.entryKey(minPartitionId, 0)
+    }
+    private get maxEntryKey() :Buffer {
+        return this.entryKey(maxPartitionId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
+    }
+
+    private _count(min: Buffer, max: Buffer) :Promise<[number, Buffer, Buffer]> {
+        let total = 0
+        return new Promise((resolve, reject) => {
+            const s = this._db.createKeyStream({
+                keyAsBuffer: true,
+                keyEncoding: 'binary',
+            })
+            s.on('error', reject)
+            s.on('data', key => {
+                min = total === 0 ? key : min
+                max = key
+                total++
+            })
+            s.on('end', () => {
+                resolve([total, min, max])
+            })
+        })
     }
     partitionKey(id :string) :Buffer {
         const size = this.options.keyPrefix.length + 'partition'.length+id.length+2
@@ -190,25 +300,16 @@ export interface ScanResult<T> {
 }
 export type Scanner<T> = (r: ScanResult<T>) => void
 export type IteratorOptions = AbstractIteratorOptions<Buffer>
-export type Hasher<T> = (values: T, keys: ReadonlyArray<keyof T>, nonce: string) => string
 
-export interface Options<P> {
+export interface Options {
     keyPrefix: string
-    hasher: Hasher<P>,
-}
-export function defaultHasher<T>(v: T, keys: ReadonlyArray<keyof T>, nonce: string) :string {
-    const m = new MetroHash64()
-    for(let k of keys) {
-        m.update(String(v[k]))
-    }
-    m.update(nonce)
-    return m.digest()
 }
 export const defaultKeyPrefix = "db"
 export type Batch<T> = AbstractBatch<Buffer, T>[]
 interface Entry<T> {
     value: T,
     ts: number,
+    key: Buffer,
 }
 type Entries<T> = List<Entry<T>>
 
@@ -239,6 +340,9 @@ export class Log<P,T> {
         this.id = id
         this.values = values
     }
+    get batch() :ReadonlyArray<AbstractBatch<Buffer, T>> {
+        return this._batch
+    }
     get stats() :Readonly<Stats> {
         return this._stats
     }
@@ -255,6 +359,10 @@ export class Log<P,T> {
         } else {
             this._stats.hit++
         }
+        this._batch.push({
+            type: 'del',
+            key: result.key,
+        })
         this._cache = this._cache.shift()
         return result.value
     }
@@ -262,24 +370,21 @@ export class Log<P,T> {
         const db = this.db
         this._batch.push({
             type: 'put',
-            key: this.keyBuffer(db.options.keyPrefix, ts),
+            key: db.entryKey(this.id, ts.getTime(), this._next++),
             value: value,
         })
     }
 
     private fill(db: DB<P,T>, now: Date) :Promise<void> {
         const options = {
-            gt: this.keyBuffer(db.options.keyPrefix, new Date(this._maxT)),
-            lt: this.keyBuffer(db.options.keyPrefix, now),
+            gt: db.entryKey(this.id, this._maxT),
+            lt: db.entryKey(this.id, now.getTime()),
         }
         return db.scan(options, (r: ScanResult<T>) => {
             const ts = keyTimestamp(r.key)
             this._cache = this._cache.push({
                 value: r.value,
                 ts: ts,
-            })
-            this._batch.push({
-                type: 'del',
                 key: r.key,
             })
             this._maxT = ts
@@ -322,18 +427,6 @@ export class Log<P,T> {
             throw new Error('No db for log')
         }
         return db
-    }
-    private keyBuffer(prefix: string, ts: Date) :Buffer {
-        const buf = Buffer.allocUnsafe(prefix.length+25) // 0x00, 8-byte partition id, 8-byte timestamp, 8-byte id
-        // Write prefix and add '\0' for correct lexicographical order
-        let n = buf.write(prefix, 0)
-        n = buf.writeUInt8(0, n)
-        // Write the partition id as binary (id is the hex string of 8 bytes)
-        n += buf.write(this.id, n, 8, 'hex')
-        n = buf.writeDoubleBE(ts.getTime(), n)
-        const id = this._next++
-        n = buf.writeDoubleBE(id, n)
-        return buf.slice(0, n)
     }
 }
 
