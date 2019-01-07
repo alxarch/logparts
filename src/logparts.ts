@@ -8,7 +8,6 @@ import { ParsedUrlQuery } from "querystring";
 type Keys<T> = (keyof T)[]
 type Dict<T> = {[K: string]: T}
 type Option<T> = T|undefined
-type Config<T> = Readonly<Partial<T>>
 type Level<T> = LevelUp<AbstractLevelDOWN<Buffer,T>>
 
 // Maps partitions to DB instances
@@ -28,13 +27,10 @@ export class DB<P,T=any> {
     private _db: Level<T>
     private _loading: Dict<Promise<Log<P,T>>> = {}
     readonly keys: ReadonlyArray<keyof P>
-    readonly options: Readonly<Options>
-    constructor(db: Level<T>, keys: Keys<P>, options: Config<Options> = {}) {
+    readonly keyPrefix: string
+    constructor(db: Level<T>, keys: Keys<P>, keyPrefix: 'logpart') {
         this._db = db
-        this.options = {
-            keyPrefix: defaultKeyPrefix,
-            ...options
-        }
+        this.keyPrefix = keyPrefix
         this.keys = [...keys]
     }
     batch(batch: Batch<T>, options?: any): Promise<void> {
@@ -184,10 +180,20 @@ export class DB<P,T=any> {
             pending,
         }
     }
+    partitionKey(id :string) :Buffer {
+        const size = this.keyPrefix.length + 1 + 'partition'.length + 1 + 8
+        const buf = Buffer.alloc(size)
+        let n = buf.write(this.keyPrefix)
+        n = buf.writeUInt8(0, n)
+        n += buf.write('partition', n)
+        n = buf.writeUInt8(0, n)
+        n += buf.write(id, n, 8, 'hex')
+        return buf.slice(0, n)
+    }
     entryKey(logId: string, ts: number, id = 0) :Buffer {
         const buf = Buffer.allocUnsafe(this.entryKeySize) 
         // Write prefix and add '\0' for correct lexicographical order
-        let n = buf.write(this.options.keyPrefix, 0)
+        let n = buf.write(this.keyPrefix, 0)
         n = buf.writeUInt8(0, n)
         // Write the partition id as binary (id is the hex string of 8 bytes)
         n += buf.write(logId, n, 8, 'hex')
@@ -198,7 +204,7 @@ export class DB<P,T=any> {
     }
     get entryKeySize() :number {
         // 0x00, 8-byte partition id, 8-byte timestamp, 8-byte id
-        return this.options.keyPrefix.length+25
+        return this.keyPrefix.length+25
     }
     private get minEntryKey() :Buffer {
         return this.entryKey(minPartitionId, 0)
@@ -224,16 +230,6 @@ export class DB<P,T=any> {
                 resolve([total, min, max])
             })
         })
-    }
-    partitionKey(id :string) :Buffer {
-        const size = this.options.keyPrefix.length + 'partition'.length+id.length+2
-        const buf = Buffer.alloc(size)
-        let n = buf.write(this.options.keyPrefix)
-        n = buf.writeUInt8(':'.charCodeAt(0), n)
-        n += buf.write('partition', n)
-        n = buf.writeUInt8(':'.charCodeAt(0), n)
-        n += buf.write(id, n)
-        return buf.slice(0, n)
     }
 
     private _partitionValues(values :P) :P {
@@ -301,9 +297,6 @@ export interface ScanResult<T> {
 export type Scanner<T> = (r: ScanResult<T>) => void
 export type IteratorOptions = AbstractIteratorOptions<Buffer>
 
-export interface Options {
-    keyPrefix: string
-}
 export const defaultKeyPrefix = "db"
 export type Batch<T> = AbstractBatch<Buffer, T>[]
 interface Entry<T> {
