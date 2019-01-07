@@ -28,7 +28,7 @@ export class DB<P,T=any> {
     private _loading: Dict<Promise<Log<P,T>>> = {}
     readonly keys: ReadonlyArray<keyof P>
     readonly keyPrefix: string
-    constructor(db: Level<T>, keys: Keys<P>, keyPrefix: 'logpart') {
+    constructor(db: Level<T>, keys: Keys<P>, keyPrefix: 'log') {
         this._db = db
         this.keyPrefix = keyPrefix
         this.keys = [...keys]
@@ -122,11 +122,14 @@ export class DB<P,T=any> {
         return logs
     }
 
-    async size() :Promise<{size: number, min: Date, max: Date}> {
-        const [size, minK, maxK] = await this._count(this.minEntryKey, this.maxEntryKey)
+    async summary() :Promise<{entries: number, logs: number, min: Date, max: Date}> {
+        const [[entries, minK, maxK], [logs]] = await Promise.all([
+            this._count(this.minEntryKey, this.maxEntryKey),
+            this._count(this.minPartitionKey, this.maxPartitionKey),
+        ])
         const min = new Date(keyTimestamp(minK))
         const max = new Date(keyTimestamp(maxK))
-        return { size, min, max }
+        return { entries, min, max, logs }
     }
 
     async count(q: ParsedUrlQuery) :Promise<countResult> {
@@ -181,14 +184,22 @@ export class DB<P,T=any> {
         }
     }
     partitionKey(id :string) :Buffer {
-        const size = this.keyPrefix.length + 1 + 'partition'.length + 1 + 8
-        const buf = Buffer.alloc(size)
+        const buf = Buffer.alloc(this.partitionKeySize)
         let n = buf.write(this.keyPrefix)
         n = buf.writeUInt8(0, n)
         n += buf.write('partition', n)
         n = buf.writeUInt8(0, n)
         n += buf.write(id, n, 8, 'hex')
         return buf.slice(0, n)
+    }
+    get partitionKeySize() :number {
+        return this.keyPrefix.length + 1 + 'partition'.length + 1 + 8
+    }
+    private get minPartitionKey() :Buffer {
+        return this.partitionKey(minPartitionId)
+    }
+    private get maxPartitionKey() :Buffer {
+        return this.partitionKey(maxPartitionId)
     }
     entryKey(logId: string, ts: number, id = 0) :Buffer {
         const buf = Buffer.allocUnsafe(this.entryKeySize) 
@@ -200,7 +211,6 @@ export class DB<P,T=any> {
         n = buf.writeDoubleBE(ts, n)
         n = buf.writeDoubleBE(id, n)
         return buf.slice(0, n)
-
     }
     get entryKeySize() :number {
         // 0x00, 8-byte partition id, 8-byte timestamp, 8-byte id
@@ -212,7 +222,6 @@ export class DB<P,T=any> {
     private get maxEntryKey() :Buffer {
         return this.entryKey(maxPartitionId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
     }
-
     private _count(min: Buffer, max: Buffer) :Promise<[number, Buffer, Buffer]> {
         let total = 0
         return new Promise((resolve, reject) => {
