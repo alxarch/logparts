@@ -1,0 +1,39 @@
+{
+  "name": "logparts",
+  "version": "0.0.1",
+  "description": "Partitioned log with LevelDB",
+  "main": "dist/logparts.js",
+  "dependencies": {
+    "immutable": "^4.0.0-rc.12",
+    "metrohash": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/levelup": "^3.1.0",
+    "@types/mocha": "^5.2.5",
+    "@types/node": "^10.12.18",
+    "@types/rimraf": "^2.0.2",
+    "level": "^4.0.0",
+    "mocha": "^5.2.0",
+    "rimraf": "^2.6.3",
+    "ts-node": "^7.0.1",
+    "typescript": "^3.2.2"
+  },
+  "scripts": {
+    "preinstall": "./node_modules/.bin/tsc",
+    "test": "./node_modules/.bin/mocha -r ts-node/register --timeout 10000 './src/**/*_test.ts'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alxarch/logparts.git"
+  },
+  "keywords": [
+    "leveldb",
+    "log"
+  ],
+  "author": "Sigalas Alexandros <alxarch@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/alxarch/logparts/issues"
+  },
+  "homepage": "https://github.com/alxarch/logparts#readme"
+}
