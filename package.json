@@ -4,7 +4,9 @@
   "description": "Partitioned log with LevelDB",
   "main": "dist/logparts.js",
   "dependencies": {
+    "@types/leveldown": "^4.0.0",
     "immutable": "^4.0.0-rc.12",
+    "leveldown": "^4.0.1",
     "metrohash": "^2.5.0"
   },
   "devDependencies": {

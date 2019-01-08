@@ -1,6 +1,6 @@
 import { LevelUp } from "levelup";
 import os from "os"
-import { DB } from "./logparts";
+import { Log } from "./logparts";
 import assert from "assert";
 import rimraf from "rimraf";
 
@@ -17,23 +17,22 @@ describe('logparts.DB', () => {
     }
 
     before(() => {
-        db = require("level")(dir, {
-            valueEncoding: 'json',
-        })
+        db = require("level")(dir)
     })
     after(() => {
         db.close()
         rimraf.sync(dir)
     })
-
     it("Opens a log for a partition", async () => {
-        const logs = new DB<P, T>(db, ["foo", "bar"])
+        const logs = new Log<P, T>(db, ["foo", "bar"])
         const log = await logs.partition({
             foo: "FOO",
             bar: "BAR",
         })
-        assert(log !== undefined)
-        const p = await db.get(`db:partition:${log!.id}`)
+        assert(log !== undefined, 'Log not found')
+        const p = await db.get(logs.partitionKey(log!.id), {
+            valueEncoding: 'json'
+        })
         assert.deepEqual(p, {
             foo: "FOO",
             bar: "BAR",
@@ -46,10 +45,11 @@ describe('logparts.DB', () => {
             age: 23,
         }, now)
         item = await log!.shift(now)
+        assert(item !== undefined, 'Item is undefined')
         assert.deepEqual(item, {
             name: "John",
             age: 23,
-        }, 'Values are equal')
+        })
         log!.push({
             name: "John",
             age: 23,
