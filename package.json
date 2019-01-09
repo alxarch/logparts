@@ -20,8 +20,8 @@
   },
   "types": "dist/logparts.d.ts",
   "scripts": {
+    "prepare": "npm run build",
     "build": "tsc",
-    "install": "tsc",
     "test": "mocha -r ts-node/register --timeout 10000 './src/**/*_test.ts'"
   },
   "repository": {
