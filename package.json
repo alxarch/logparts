@@ -1,6 +1,6 @@
 {
   "name": "logparts",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Partitioned log with LevelDB",
   "main": "dist/logparts.js",
   "dependencies": {
